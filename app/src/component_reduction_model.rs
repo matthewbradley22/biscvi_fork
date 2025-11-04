@@ -55,6 +55,7 @@ impl Model {
                         reduction_data={current_umap_data} 
                         color_reduction_by={coloring_data.clone()} 
                         last_component_size={self.last_component_size.clone()}
+                        current_colorby={self.current_colorby.clone()}
                     />
                 </div>
                 <MetadataView 

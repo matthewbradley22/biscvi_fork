@@ -1,3 +1,4 @@
+use core::str;
 use std::io::BufRead;
 use std::io::Cursor;
 use std::io::BufReader;
@@ -7,10 +8,13 @@ use my_web_app::ReductionResponse;
 use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::window;
-use web_sys::{DomRect, EventTarget, HtmlCanvasElement, WebGlRenderingContext as GL};
+use web_sys::{DomRect, EventTarget, HtmlElement, HtmlCanvasElement, CanvasRenderingContext2d, WebGlRenderingContext as GL};
+use yew::context;
 use yew::{html, Callback, Component, Context, Html, MouseEvent, NodeRef, WheelEvent};
 use yew::Properties;
+use std::f64;
 
 use crate::appstate::AsyncData;
 use crate::appstate::PerCellDataSource;
@@ -156,14 +160,14 @@ pub struct Props {
     pub reduction_data: AsyncData<ReductionViewData>, 
     pub color_reduction_by: ReductionColoringWithData,
     pub last_component_size: ComponentSize,
-
+     pub current_colorby: PerCellDataSource,
 }
 
 
 ////////////////////////////////////////////////////////////
 /// random note: Wrap gl in Rc (Arc for multi-threaded) so it can be injected into the render-loop closure.
 pub struct ReductionView {
-    node_ref: NodeRef,
+    node_refs: Vec<NodeRef>,
     last_pos: (f32,f32),
     last_cell: Option<usize>,
     closest_point_index: ClosestPointIndex2D,
@@ -176,12 +180,12 @@ pub struct ReductionView {
 impl Component for ReductionView {
     type Message = MsgReduction;
     type Properties = Props;
-
+    
     ////////////////////////////////////////////////////////////
     /// Create this component
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
-            node_ref: NodeRef::default(),
+            node_refs:vec![NodeRef::default(), NodeRef::default()],
             last_pos: (0.0,0.0),
             last_cell: None,
             closest_point_index: ClosestPointIndex2D::new(), //tricky... adapt to umap size??
@@ -364,6 +368,11 @@ impl Component for ReductionView {
     ////////////////////////////////////////////////////////////
     /// Render this component
     fn view(&self, ctx: &Context<Self>) -> Html {
+       let current_legend: PerCellDataSource = ctx.props().current_colorby.clone();
+       let legend_name = match current_legend {
+           PerCellDataSource::Metadata(name) => name,
+           PerCellDataSource::Counts(_,_) => "Error_naming_legend".to_string()
+       };
 
         let cb_mousemoved = ctx.link().callback(move |e: MouseEvent | { 
             e.prevent_default();
@@ -416,7 +425,7 @@ impl Component for ReductionView {
             let (x1,y1) = self.camera.world2cam(x1, y1); //camera is in range [-1,1]
             let (x2,y2) = self.camera.world2cam(x2, y2);
 
-            let canvas = self.node_ref.cast::<HtmlCanvasElement>().unwrap();
+            let canvas = self.node_refs[0].cast::<HtmlCanvasElement>().unwrap();
             let w = canvas.width() as f32;
             let h = canvas.height() as f32;
 
@@ -438,14 +447,14 @@ impl Component for ReductionView {
         let window_w = window.inner_width().expect("failed to get width").as_f64().unwrap();
         let canvas_w = (window_w*0.59) as usize;
         let canvas_h = 500 as usize; //(window_h*0.59) as usize;
-
+        
         //Compose the view
         html! {
             <div style="display: flex; height: 500px; position: relative;">
 
                 <div style="position: absolute; left:0; top:0; display: flex; ">
                     <canvas 
-                        ref={self.node_ref.clone()} 
+                        ref={self.node_refs[0].clone()} 
                         style="border:1px solid #000000;"
                         onmousemove={cb_mousemoved} onclick={cb_mouseclicked} onwheel={cb_mousewheel} onmousedown={cb_onmousedown} onmouseup={cb_onmouseup}
                         width={format!{"{}", canvas_w}}
@@ -474,6 +483,14 @@ impl Component for ReductionView {
                 <div style={get_tool_style(canvas_w-40-30-30, self.current_tool==CurrentTool::ZoomAll)} onclick={cb_click_zoomall}>
                     <svg data-icon="zoom-in" height="16" width="16" xmlns="http://www.w3.org/2000/svg"><path style="fill:none;stroke:#000;stroke-width:2.01074px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" d="M14.733 8.764v5.973H9.586m-8.29-5.973v5.973h5.146m8.29-7.5V1.264H9.587m-8.29 5.973V1.264h5.146"/></svg>
                 </div>
+                 <div id = "continuous_var_legend" style="position: absolute; left: 8px; top: 55px; z-index: 1; pointer-events: none; height: 200px; width: 80px;">
+                 <canvas ref={self.node_refs[1].clone()} height = "180" width = "20" style="position: absolute; left: 0px; top: 17px;" id = "legend_canvas">
+                 </canvas>
+                  <svg height="200px" width="80px" style="position: absolute; left: 0px; top: 0px;">
+                   <path d="M 20 10 H 19 V 200 Z" stroke="black" />
+                 <text id="continuous_var_label" transform="rotate(-90)" y="2" x="-100" dy="1em" data-testid="continuous_legend_color_by_label" aria-label="nCount_RNA" style="text-anchor: middle; fill: white; padding: 2px;">{legend_name}</text>
+                 </svg>
+                 </div>
 
             </div>
         }
@@ -484,7 +501,6 @@ impl Component for ReductionView {
     ////////////////////////////////////////////////////////////
     /// Called after DOM has been created
     fn rendered(&mut self, ctx: &Context<Self>, _first_render: bool) {
-
         let reduction_data = &ctx.props().reduction_data;
 
         if let AsyncData::Loaded(datapoints) = reduction_data {
@@ -513,7 +529,7 @@ impl Component for ReductionView {
             // Once rendered, store references for the canvas and GL context. These can be used for
             // resizing the rendering area when the window or canvas element are resized, as well as
             // for making GL calls.
-            let canvas = self.node_ref.cast::<HtmlCanvasElement>().unwrap();
+            let canvas = self.node_refs[0].cast::<HtmlCanvasElement>().unwrap();
 
             let gl: GL = canvas
                 .get_context("webgl")
@@ -573,13 +589,103 @@ impl Component for ReductionView {
 
                             //Normalize color range. TODO should only need to do this once during loading
                             let (_min_val, max_val) = make_safe_minmax(&vec_data);
-
                             for (i,p) in vec_data.into_iter().enumerate() {
                                 let base = vec_vertex_size*i;
                                 vec_vertex[base + 3] = p/max_val;
                                 vec_vertex[base + 4] = 0.0;
                                 vec_vertex[base + 5] = 0.0;
                             }
+
+                            let max_cont_val: f32 = max_val;
+                            log::debug!("Max num {}", max_cont_val);
+
+            
+                            let document = web_sys::window().unwrap().document().unwrap();
+                            log::debug!("{:?}", document);
+                            let canvas = document.get_element_by_id("legend_canvas").unwrap();
+                            log::debug!("{:?}", web_sys::Element::get_attribute_names(&canvas));
+                            let canvas: web_sys::HtmlCanvasElement = canvas
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| ())
+        .unwrap();
+    let context = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    log::debug!("{:?}", web_sys::CanvasRenderingContext2d::stroke_style(&context));
+    context.begin_path();
+
+    // Draw the outer circle.
+    context
+        .round_rect(5.0, 0.0, 15.0, 180.0)
+        .unwrap();
+    context.stroke();
+
+    #[wasm_bindgen(module = "/src/color_legend_gradient.js")]
+    extern "C" {
+         fn color_gradient(context: CanvasRenderingContext2d) -> CanvasRenderingContext2d;
+    }
+    let context = color_gradient(context);
+    context.fill();
+    
+
+
+/* 
+                         let legend_vert_code = String::from(include_str!("./legend_bar.vert"));
+                        let legend_frag_code = include_str!("./legend_bar.frag");
+
+                        let legend_bar = self.node_refs[1].cast::<HtmlCanvasElement>().unwrap();
+                        let gl_legend: GL = legend_bar
+                        .get_context("webgl")
+                        .unwrap()
+                        .unwrap()
+                        .dyn_into()
+                        .unwrap();
+
+                        gl_legend.clear_color(5.0, 3.0, 0.0, 1.0);
+                        gl_legend.clear(GL::COLOR_BUFFER_BIT);
+
+                        let legend_vert_shader = gl_legend.create_shader(GL::VERTEX_SHADER).unwrap();
+                         gl_legend.shader_source(&legend_vert_shader, legend_vert_code.as_str());
+                          gl_legend.compile_shader(&legend_vert_shader);
+
+                          let legend_frag_shader = gl_legend.create_shader(GL::FRAGMENT_SHADER).unwrap();
+                        gl_legend.shader_source(&legend_frag_shader, legend_frag_code);
+                          gl_legend.compile_shader(&legend_frag_shader);
+
+                          //Attach shaders
+                    let legend_shader_program = gl_legend.create_program().unwrap();
+                    gl_legend.attach_shader(&legend_shader_program, &legend_vert_shader);
+                    gl_legend.attach_shader(&legend_shader_program, &legend_frag_shader);
+                    gl_legend.link_program(&legend_shader_program);
+                    gl_legend.use_program(Some(&legend_shader_program));
+
+                    //Attach the position vector as an attribute for the GL context.
+                    let a_position = gl_legend.get_attrib_location(&legend_shader_program, "a_position") as u32;
+
+                    let positionBuffer = gl_legend.create_buffer().unwrap();
+                    gl_legend.bind_buffer(GL::ARRAY_BUFFER, Some(&positionBuffer));
+
+                    let positions: Vec<f32> = vec![
+                    -1.0, -1.0, 
+                    1.0, -1.0, 
+                    -1.0, 1.0, 
+                    -1.0, 1.0, 
+                    1.0, -1.0, 
+                    1.0, 1.0,
+                ];
+       
+                let verts = js_sys::Float32Array::from(positions.as_slice());
+                gl_legend.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &verts, GL::STATIC_DRAW);
+
+                gl_legend.vertex_attrib_pointer_with_i32(a_position, 2, GL::FLOAT, false, 0, 0);
+                gl_legend.enable_vertex_attrib_array(a_position);
+
+                gl_legend.draw_arrays(GL::TRIANGLES, 0, 6); */
+
                         },
 
                         ///////// Color by numerical data - sparse array
